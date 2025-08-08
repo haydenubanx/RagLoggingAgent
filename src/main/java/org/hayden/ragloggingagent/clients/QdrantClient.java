@@ -10,6 +10,7 @@ import java.net.http.HttpResponse;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.hayden.ragloggingagent.models.QdrantPoint;
+import org.hayden.ragloggingagent.utils.DateFormatUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
@@ -206,7 +207,7 @@ public class QdrantClient {
             name = "Qdrant_Vector_Similarity_Search",
             description = "Search for the most similar vectors in a Qdrant collection. Provide the collection name, a query vector, and the number of similar results to return (limit). Returns the closest points with their payloads."
     )
-    public HttpResponse<String> search( double[] vector, int limit) throws
+    public HttpResponse<String> search(double[] vector, int limit) throws
             IOException, InterruptedException {
         String url = qdrantUrl + "/collections/" + collectionName + "/points/search";
 
@@ -235,7 +236,7 @@ public class QdrantClient {
         return response;
     }
 
-    public HttpResponse<String> getPoints( List<Integer> pointIds) throws
+    public HttpResponse<String> getPoints(List<Integer> pointIds) throws
             IOException, InterruptedException {
         String url = qdrantUrl + "/collections/" + collectionName + "/points";
 
@@ -272,7 +273,7 @@ public class QdrantClient {
         CompletableFuture<Void> done = new CompletableFuture<>();
 
         // Start recursive fetching
-        fetchChunkAsync( initialOffset, allPoints, executorService, activeTasks, done);
+        fetchChunkAsync(initialOffset, allPoints, executorService, activeTasks, done);
 
         // Wait until all recursive fetches are complete
         done.join();
@@ -285,58 +286,72 @@ public class QdrantClient {
     private void fetchChunkAsync(int offset, Map<Integer, String> allPoints,
                                  ExecutorService executorService, AtomicInteger activeTasks, CompletableFuture<Void> done) {
 
-        // Increment task count
         activeTasks.incrementAndGet();
 
-        executorService.submit(() -> {
-            try {
-                String url = qdrantUrl + "/collections/" + collectionName + "/points/scroll";
-                Map<String, Object> payload = new HashMap<>();
-                payload.put("with_payload", true);
-                payload.put("with_vector", false);
-                payload.put("limit", 10000);
-                if (offset != 0) {
-                    payload.put("offset", offset);
-                }
+        String url = qdrantUrl + "/collections/" + collectionName + "/points/scroll";
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("with_payload", true);
+        payload.put("with_vector", false);
+        payload.put("limit", 10000);
+        if (offset != 0) {
+            payload.put("offset", offset);
+        }
 
-                String bodyJson = objectMapper.writeValueAsString(payload);
+        try {
+            String bodyJson = objectMapper.writeValueAsString(payload);
 
-                HttpRequest request = HttpRequest.newBuilder()
-                        .uri(URI.create(url))
-                        .POST(HttpRequest.BodyPublishers.ofString(bodyJson))
-                        .header("Content-Type", "application/json")
-                        .build();
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .POST(HttpRequest.BodyPublishers.ofString(bodyJson))
+                    .header("Content-Type", "application/json")
+                    .build();
 
-                HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-                if (response.statusCode() >= 200 && response.statusCode() < 300) {
-                    JsonNode responseBody = objectMapper.readTree(response.body());
-                    JsonNode points = responseBody.path("result").path("points");
-                    JsonNode nextPageOffset = responseBody.path("result").path("next_page_offset");
+            client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+                    .thenAccept(response -> {
+                        try {
+                            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                                JsonNode responseBody = objectMapper.readTree(response.body());
+                                JsonNode points = responseBody.path("result").path("points");
+                                JsonNode nextPageOffset = responseBody.path("result").path("next_page_offset");
 
-                    for (JsonNode point : points) {
-                        int id = point.path("id").asInt();
-                        String word = point.path("payload").path("word").asText();
-                        allPoints.put(id, word);
-                    }
+                                for (JsonNode point : points) {
+                                    int id = point.path("id").asInt();
+                                    String word = point.path("payload").path("word").asText();
+                                    allPoints.put(id, word);
+                                }
 
-                    if (!nextPageOffset.isNull()) {
-                        int nextOffset = nextPageOffset.asInt();
-                        fetchChunkAsync( nextOffset, allPoints, executorService, activeTasks, done);
-                    }
-                } else {
-                    LOGGER.error("Failed to fetch points at offset {}: {}", offset, response.body());
-                }
+                                if (!nextPageOffset.isNull()) {
+                                    int nextOffset = nextPageOffset.asInt();
+                                    fetchChunkAsync(nextOffset, allPoints, executorService, activeTasks, done);
+                                }
+                            } else {
+                                LOGGER.error("Failed to fetch points at offset {}: {}", offset, response.body());
+                            }
+                        } catch (Exception e) {
+                            LOGGER.error("Error processing async response at offset {}: {}", offset, e.getMessage());
+                        } finally {
+                            int remaining = activeTasks.decrementAndGet();
+                            if (remaining == 0) {
+                                done.complete(null);
+                            }
+                        }
+                    })
+                    .exceptionally(e -> {
+                        LOGGER.error("Async error fetching points at offset {}: {}", offset, e.getMessage());
+                        int remaining = activeTasks.decrementAndGet();
+                        if (remaining == 0) {
+                            done.complete(null);
+                        }
+                        return null;
+                    });
 
-            } catch (Exception e) {
-                LOGGER.error("Error fetching points at offset {}: {}", offset, e.getMessage());
-            } finally {
-                // Decrement task count
-                int remaining = activeTasks.decrementAndGet();
-                if (remaining == 0) {
-                    done.complete(null); // All tasks done
-                }
+        } catch (Exception e) {
+            LOGGER.error("Error preparing async request at offset {}: {}", offset, e.getMessage());
+            int remaining = activeTasks.decrementAndGet();
+            if (remaining == 0) {
+                done.complete(null);
             }
-        });
+        }
     }
 
     @Tool(
@@ -357,6 +372,13 @@ public class QdrantClient {
             int limit
     ) throws IOException, InterruptedException {
         String url = qdrantUrl + "/collections/" + collectionName + "/points/search";
+
+        startTimestamp = DateFormatUtil.toIso8601(startTimestamp);
+        endTimestamp = DateFormatUtil.toIso8601(endTimestamp);
+
+
+        startTimestamp = DateFormatUtil.toLogFormat(startTimestamp);
+        endTimestamp = DateFormatUtil.toLogFormat(endTimestamp);
 
         Map<String, Object> filter = new HashMap<>();
         List<Map<String, Object>> must = new ArrayList<>();
@@ -428,6 +450,13 @@ public class QdrantClient {
         Map<String, Object> filter = new HashMap<>();
         List<Map<String, Object>> must = new ArrayList<>();
 
+        startTimestamp = DateFormatUtil.toIso8601(startTimestamp);
+        endTimestamp = DateFormatUtil.toIso8601(endTimestamp);
+
+
+        startTimestamp = DateFormatUtil.toLogFormat(startTimestamp);
+        endTimestamp = DateFormatUtil.toLogFormat(endTimestamp);
+
         if (startTimestamp != null && endTimestamp != null) {
             must.add(Map.of("key", "timestamp", "range", Map.of("gte", startTimestamp, "lte", endTimestamp)));
         }
@@ -478,12 +507,19 @@ public class QdrantClient {
         List<Map<String, Object>> allLogs = new ArrayList<>();
         int offset = 0, limit = 10000;
         boolean hasMore = true;
+        startTimestamp = DateFormatUtil.toIso8601(startTimestamp);
+        endTimestamp = DateFormatUtil.toIso8601(endTimestamp);
+
+
+        startTimestamp = DateFormatUtil.toLogFormat(startTimestamp);
+        endTimestamp = DateFormatUtil.toLogFormat(endTimestamp);
 
         while (hasMore) {
             String url = qdrantUrl + "/collections/" + collectionName + "/points/scroll";
             Map<String, Object> filter = new HashMap<>();
             List<Map<String, Object>> must = new ArrayList<>();
-            if (startTimestamp != null && endTimestamp != null) must.add(Map.of("key", "timestamp", "range", Map.of("gte", startTimestamp, "lte", endTimestamp)));
+            if (startTimestamp != null && endTimestamp != null)
+                must.add(Map.of("key", "timestamp", "range", Map.of("gte", startTimestamp, "lte", endTimestamp)));
             if (statusCode != null) must.add(Map.of("key", "status", "match", Map.of("value", statusCode)));
             if (ip != null) must.add(Map.of("key", "ip", "match", Map.of("value", ip)));
             if (requestType != null) must.add(Map.of("key", "request_type", "match", Map.of("value", requestType)));
@@ -601,9 +637,18 @@ public class QdrantClient {
             String userAgent,
             String responseTime
     ) throws Exception {
+
+
+        startTimestamp = DateFormatUtil.toIso8601(startTimestamp);
+        endTimestamp = DateFormatUtil.toIso8601(endTimestamp);
+
+
+        startTimestamp = DateFormatUtil.toLogFormat(startTimestamp);
+        endTimestamp = DateFormatUtil.toLogFormat(endTimestamp);
+
         // Aggregate data
         Map<String, Integer> data = aggregateLogs(
-                 yField, startTimestamp, endTimestamp, statusCode, ip, requestType, endpoint, size, referer, userAgent, responseTime
+                yField, startTimestamp, endTimestamp, statusCode, ip, requestType, endpoint, size, referer, userAgent, responseTime
         );
 
         // Create dataset
@@ -631,5 +676,23 @@ public class QdrantClient {
         return java.util.Base64.getEncoder().encodeToString(baos.toByteArray());
     }
 
+    @Tool(
+            name = "Qdrant_List_Metadata_Fields",
+            description = "List all metadata field names available in the Qdrant collection. Returns a set of field names."
+    )
+    public Set<String> listMetadataFields() {
+        // Update this set if your schema changes
+        return Set.of(
+                "timestamp",
+                "status",
+                "ip",
+                "request_type",
+                "endpoint",
+                "size",
+                "referer",
+                "user_agent",
+                "response_time"
+        );
+    }
 
 }
