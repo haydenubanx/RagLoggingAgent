@@ -638,14 +638,6 @@ public class QdrantClient {
             String responseTime
     ) throws Exception {
 
-
-        startTimestamp = DateFormatUtil.toIso8601(startTimestamp);
-        endTimestamp = DateFormatUtil.toIso8601(endTimestamp);
-
-
-        startTimestamp = DateFormatUtil.toLogFormat(startTimestamp);
-        endTimestamp = DateFormatUtil.toLogFormat(endTimestamp);
-
         // Aggregate data
         Map<String, Integer> data = aggregateLogs(
                 yField, startTimestamp, endTimestamp, statusCode, ip, requestType, endpoint, size, referer, userAgent, responseTime
@@ -678,20 +670,20 @@ public class QdrantClient {
 
     @Tool(
             name = "Qdrant_List_Metadata_Fields",
-            description = "List all metadata field names available in the Qdrant collection. Returns a set of field names."
+            description = "List all metadata field names available in the Qdrant collection. Returns a set of field names and example values for each field."
     )
     public Set<String> listMetadataFields() {
-        // Update this set if your schema changes
+        // Each field includes an example value to clarify the expected format
         return Set.of(
-                "timestamp",
-                "status",
-                "ip",
-                "request_type",
-                "endpoint",
-                "size",
-                "referer",
-                "user_agent",
-                "response_time"
+                "timestamp (e.g., 27/Dec/2037:12:00:00 +0530)",
+                "status (e.g., 502)",
+                "ip (e.g., 233.223.117.90)",
+                "request_type (e.g., DELETE)",
+                "endpoint (e.g., /usr/admin)",
+                "size (e.g., 4963)",
+                "referer (e.g., \"-\")",
+                "user_agent (e.g., \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...\")",
+                "response_time (e.g., 45)"
         );
     }
 
